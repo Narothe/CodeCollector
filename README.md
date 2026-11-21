@@ -132,6 +132,10 @@ python main.py
    - **Copy all** - copies everything to the clipboard,
    - **Close** - closes the window without saving.
 
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
 ## Author
 
 - [Narothe](https://github.com/Narothe)
