@@ -1,0 +1,734 @@
+============================================================
+config.py
+============================================================
+
+"""Central place for all tunable settings of the application."""
+
+# ----------------------------
+# Export settings
+# ----------------------------
+
+# Name of the generated file (also skipped when collecting, so it is never re-exported).
+OUTPUT_FILE_NAME = "project_code.txt"
+
+# Ask for confirmation when a project has more files than this.
+WARNING_FILE_LIMIT = 2000
+
+# Directories that are never exported.
+IGNORE_DIRS = {
+    ".git",
+    ".idea",
+    ".vscode",
+    "__pycache__",
+    "venv",
+    ".venv",
+    "node_modules",
+    "dist",
+    "build",
+}
+
+# File names that are never exported.
+IGNORE_FILES = {
+    OUTPUT_FILE_NAME,
+}
+
+# Only files with these extensions are exported.
+INCLUDE_EXTENSIONS = {
+    ".py", ".js", ".ts", ".tsx", ".jsx",
+    ".html", ".css",
+    ".json", ".yaml", ".yml", ".toml",
+    ".md", ".txt", ".sql", ".xml",
+    ".cs", ".csproj", ".sln",
+    ".java", ".kt",
+    ".cpp", ".c", ".h", ".hpp",
+    ".php", ".go", ".rs",
+    ".swift", ".dart",
+}
+
+# ----------------------------
+# UI settings
+# ----------------------------
+
+# Maximum number of characters shown in the preview.
+# Copying and saving always use the full text.
+PREVIEW_LIMIT = 200_000
+
+FONT = "Segoe UI"
+CODE_FONT = "Consolas"
+
+
+
+============================================================
+exporter.py
+============================================================
+
+"""Core logic: finding project files, reading them and building the export text."""
+
+from pathlib import Path
+
+from config import (
+    IGNORE_DIRS,
+    IGNORE_FILES,
+    INCLUDE_EXTENSIONS,
+    OUTPUT_FILE_NAME,
+    WARNING_FILE_LIMIT,
+)
+
+# Encodings tried in order when reading a file.
+ENCODINGS = ("utf-8", "utf-8-sig", "cp1250", "latin-1")
+
+
+def should_ignore(relative_path: Path) -> bool:
+    """True if any part of the path (relative to the project root) is an ignored directory."""
+    return any(part in IGNORE_DIRS for part in relative_path.parts)
+
+
+def read_file(file: Path) -> str:
+    """Reads a text file, trying several encodings before giving up."""
+    for encoding in ENCODINGS:
+        try:
+            return file.read_text(encoding=encoding)
+        except (UnicodeDecodeError, OSError):
+            continue
+
+    return "[The file could not be read]"
+
+
+def format_header(relative_path) -> str:
+    """Header printed above every file in the export."""
+    line = "=" * 60
+    return f"{line}\n{relative_path}\n{line}\n\n"
+
+
+def collect_files(folder):
+    """Yields (relative_path, content) for every file that should be exported."""
+    root = Path(folder)
+
+    for file in sorted(root.rglob("*")):
+        if not file.is_file():
+            continue
+
+        if file.name in IGNORE_FILES:
+            continue
+
+        # Check the path relative to the root, so that a project living inside
+        # e.g. "C:\\build\\app" is not ignored entirely.
+        if should_ignore(file.relative_to(root)):
+            continue
+
+        if file.suffix.lower() not in INCLUDE_EXTENSIONS:
+            continue
+
+        yield file.relative_to(root), read_file(file)
+
+
+def files_to_text(files) -> str:
+    """Joins (relative_path, content) pairs into the final export text."""
+    parts = []
+
+    for relative_path, content in files:
+        parts.append(format_header(relative_path))
+        parts.append(content)
+        parts.append("\n\n\n")
+
+    return "".join(parts)
+
+
+def default_output_path(folder) -> Path:
+    """Default location of the exported file: inside the project folder."""
+    return Path(folder) / OUTPUT_FILE_NAME
+
+
+def save_text(path, text: str) -> Path:
+    """Writes the export text to the given file path and returns that path."""
+    output_file = Path(path)
+    output_file.write_text(text, encoding="utf-8")
+
+    return output_file
+
+
+def analyze_project(folder):
+    """
+    Quickly counts files and directories.
+
+    Returns:
+        (files_count, directories_count, limit_exceeded)
+    """
+    root = Path(folder)
+
+    files = 0
+    directories = 0
+
+    for item in root.rglob("*"):
+        if should_ignore(item.relative_to(root)):
+            continue
+
+        if item.is_dir():
+            directories += 1
+
+        elif item.is_file():
+            files += 1
+
+            # Stop counting once the warning limit is exceeded.
+            if files > WARNING_FILE_LIMIT:
+                return files, directories, True
+
+    return files, directories, False
+
+
+
+============================================================
+gui.py
+============================================================
+
+"""Main window: choose a project folder and generate the export."""
+
+import customtkinter as ctk
+from tkinter import filedialog, messagebox
+
+from config import FONT
+from exporter import analyze_project, collect_files
+from result_window import ResultWindow
+
+MUTED_TEXT = ("gray35", "gray70")
+
+
+def run():
+    ctk.set_appearance_mode("System")  # follow the OS light/dark setting
+    ctk.set_default_color_theme("blue")
+
+    app = ctk.CTk()
+    app.title("Project Code Exporter")
+    app.geometry("640x300")
+    app.resizable(False, False)
+
+    path_var = ctk.StringVar()  # selected project folder
+    status_var = ctk.StringVar(value="Ready")
+
+    # ---- Actions ----
+
+    def browse():
+        """Lets the user pick the project folder."""
+        folder = filedialog.askdirectory()
+
+        if folder:
+            path_var.set(folder)
+
+    def confirm_large_project(files_count, directories):
+        """Asks whether to continue with a very large project."""
+        return messagebox.askyesno(
+            "Large Project",
+            f"The selected project contains more than {files_count:,} files\n"
+            f"in at least {directories:,} directories.\n\n"
+            "Exporting such a large directory may take a long time.\n\n"
+            "Do you want to continue?"
+        )
+
+    def generate():
+        """Collects the project files and opens the result window."""
+        folder = path_var.get().strip()
+
+        # Validate the input before touching the file system.
+        if not folder:
+            messagebox.showwarning("Warning", "Select a project folder.")
+            return
+
+        files_count, directories, limit_exceeded = analyze_project(folder)
+
+        if limit_exceeded and not confirm_large_project(files_count, directories):
+            return
+
+        # Show progress while collecting.
+        status_var.set("Generating...")
+        generate_btn.configure(state="disabled")
+        progress.pack(fill="x", padx=30, pady=(0, 6))
+        progress.start()
+        app.update_idletasks()
+
+        try:
+            files = list(collect_files(folder))
+        except Exception as error:
+            status_var.set("Export failed.")
+            messagebox.showerror("Error", str(error))
+            return
+        finally:
+            # Always restore the UI, whether collecting succeeded or not.
+            progress.stop()
+            progress.pack_forget()
+            generate_btn.configure(state="normal")
+
+        status_var.set(f"Done ✓ {len(files):,} files collected")
+        ResultWindow(app, folder, files, status_var)
+
+    # ---- Layout ----
+
+    card = ctk.CTkFrame(app, corner_radius=14)
+    card.pack(fill="both", expand=True, padx=20, pady=20)
+
+    ctk.CTkLabel(
+        card, text="Project Code Exporter", font=(FONT, 24, "bold")
+    ).pack(pady=(18, 0))
+
+    ctk.CTkLabel(
+        card,
+        text="Collect a project's source code into a single text file",
+        font=(FONT, 13),
+        text_color=MUTED_TEXT,
+    ).pack(pady=(0, 14))
+
+    # Folder row: entry + Browse button.
+    row = ctk.CTkFrame(card, fg_color="transparent")
+    row.pack(fill="x", padx=30)
+
+    ctk.CTkEntry(
+        row,
+        textvariable=path_var,
+        placeholder_text="Project folder...",
+        height=38,
+        corner_radius=10,
+    ).pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+    ctk.CTkButton(
+        row, text="Browse", width=100, height=38, corner_radius=10, command=browse
+    ).pack(side="right")
+
+    generate_btn = ctk.CTkButton(
+        card,
+        text="Generate",
+        width=220,
+        height=42,
+        corner_radius=10,
+        font=(FONT, 15, "bold"),
+        command=generate,
+    )
+    generate_btn.pack(pady=18)
+
+    # Only packed while generating (see generate()).
+    progress = ctk.CTkProgressBar(card, mode="indeterminate")
+
+    ctk.CTkLabel(
+        card, textvariable=status_var, font=(FONT, 12), text_color=MUTED_TEXT
+    ).pack(pady=(0, 10))
+
+    app.mainloop()
+
+
+
+============================================================
+highlight.py
+============================================================
+
+"""Syntax highlighting of the preview text (powered by Pygments)."""
+
+import customtkinter as ctk
+from pygments import lex
+from pygments.lexers import TextLexer, get_lexer_for_filename
+from pygments.token import Token
+from pygments.util import ClassNotFound
+
+from config import PREVIEW_LIMIT
+from exporter import format_header
+
+# Colors per token type as (light theme, dark theme).
+# Token types not listed here inherit the color of their nearest listed parent.
+SYNTAX_COLORS = {
+    Token.Comment: ("#6a737d", "#6a9955"),
+    Token.Keyword: ("#af00db", "#c586c0"),
+    Token.Keyword.Constant: ("#0000ff", "#569cd6"),
+    Token.Operator.Word: ("#af00db", "#c586c0"),
+    Token.Literal.String: ("#a31515", "#ce9178"),
+    Token.Literal.Number: ("#098658", "#b5cea8"),
+    Token.Name.Function: ("#795e26", "#dcdcaa"),
+    Token.Name.Class: ("#267f99", "#4ec9b0"),
+    Token.Name.Decorator: ("#795e26", "#dcdcaa"),
+    Token.Name.Builtin: ("#0070c1", "#4fc1ff"),
+    Token.Name.Tag: ("#800000", "#569cd6"),
+    Token.Name.Attribute: ("#e50000", "#9cdcfe"),
+    Token.Name.Exception: ("#267f99", "#4ec9b0"),
+    Token.Operator: ("#5a5a5a", "#d4d4d4"),
+    Token.Generic.Heading: ("#0070c1", "#569cd6"),
+}
+
+# Color of the file name headers and of the "truncated" note.
+HEADER_COLOR = ("#0b5cad", "#6cb6ff")
+HEADER_TAG = "header"
+
+
+def _tag_for(token_type):
+    """Returns the tag name for a token type, or None if it should stay uncolored."""
+    # Walk up the token hierarchy until a colored type is found.
+    while token_type not in SYNTAX_COLORS:
+        if token_type is Token:
+            return None
+        token_type = token_type.parent
+
+    return str(token_type)
+
+
+def _lexer_for(file_name, content):
+    """Picks a Pygments lexer by file name; plain text if the language is unknown."""
+    try:
+        return get_lexer_for_filename(str(file_name), content, stripnl=False)
+    except ClassNotFound:
+        return TextLexer(stripnl=False)
+
+
+def _configure_tags(text_widget):
+    """Registers one tk tag per color, matching the current light/dark theme."""
+    index = 0 if ctk.get_appearance_mode() == "Light" else 1
+
+    for token_type, colors in SYNTAX_COLORS.items():
+        text_widget.tag_configure(str(token_type), foreground=colors[index])
+
+    text_widget.tag_configure(HEADER_TAG, foreground=HEADER_COLOR[index])
+
+
+def fill_preview(textbox, files):
+    """
+    Inserts the files into a CTkTextbox with syntax colors.
+
+    The preview is truncated at PREVIEW_LIMIT characters to keep the window fast.
+    """
+    # The underlying tk.Text is much faster for many small inserts.
+    widget = textbox._textbox
+    _configure_tags(widget)
+
+    used = 0
+    truncated = False
+
+    for relative_path, content in files:
+        header = format_header(relative_path)
+        widget.insert("end", header, HEADER_TAG)
+        used += len(header)
+
+        budget = PREVIEW_LIMIT - used
+        if budget <= 0:
+            truncated = True
+            break
+
+        # Cut the content before lexing, so huge files are not processed needlessly.
+        if len(content) > budget:
+            content = content[:budget]
+            truncated = True
+
+        for token_type, value in lex(content, _lexer_for(relative_path, content)):
+            widget.insert("end", value, _tag_for(token_type))
+
+        widget.insert("end", "\n\n\n")
+        used += len(content) + 3
+
+        if truncated:
+            break
+
+    if truncated:
+        widget.insert(
+            "end",
+            "... preview truncated. Copy and Save include the full text.",
+            HEADER_TAG,
+        )
+
+
+
+============================================================
+main.py
+============================================================
+
+"""Entry point: starts the Project Code Exporter GUI."""
+
+from gui import run
+
+if __name__ == "__main__":
+    run()
+
+
+
+============================================================
+README.md
+============================================================
+
+<h1 align="center">CodeCollector</h1>
+
+<p align="center">
+  A simple desktop app that collects a project's source code into a single text file - ready to paste into an AI chat or share.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/GUI-CustomTkinter-1f6aa5" alt="CustomTkinter">
+  <img src="https://img.shields.io/badge/Highlighting-Pygments-2b7a78" alt="Pygments">
+</p>
+
+---
+
+## About the project
+
+CodeCollector walks through a project folder, picks up the source files worth sharing and joins them into one text file. Every file is preceded by a header with its relative path, so the result stays easy to read and navigate. After the export, the app shows a colorized preview where you can save the file to a location of your choice or copy everything to the clipboard.
+
+## Features
+
+**Collecting code**
+- Recursively collects source files from the selected project folder
+- Skips directories such as `.git`, `.idea`, `.vscode`, `__pycache__`, `venv`, `node_modules`, `dist` and `build`
+- Supports many languages (Python, JavaScript/TypeScript, C#, Java, Kotlin, C/C++, Go, Rust, PHP, Swift, Dart, SQL, HTML/CSS and common config formats)
+- Reads files in several encodings (UTF-8, UTF-8 with BOM, CP1250, Latin-1)
+- Asks for confirmation before processing very large projects
+
+**Result window**
+- Syntax-highlighted preview, adapted to the light and dark theme
+- Save location shown up front (defaults to the project folder) and changeable with a "Save as" dialog
+- **Save file** writes the full text to the chosen path
+- **Copy all** copies the full, uncolored text to the clipboard
+
+**Interface**
+- Clean, minimal window built with CustomTkinter
+- Follows the system light/dark mode
+- Progress indicator while the project is being scanned
+
+## Architecture
+
+The code is split into small modules with a single responsibility each:
+
+```
+CodeCollector/
+├── main.py            # Entry point
+├── gui.py             # Main window: folder selection and Generate button
+├── result_window.py   # Result window: preview, save location, Save / Copy all
+├── highlight.py       # Syntax highlighting of the preview (Pygments)
+├── exporter.py        # Collecting, reading and joining files, saving the result
+├── config.py          # Ignored folders, file extensions, limits, fonts
+└── requirements.txt   # Python dependencies
+```
+
+### Configuration
+
+All tunable settings live in `config.py`:
+
+- **`IGNORE_DIRS` / `IGNORE_FILES`**: folders and files that are never exported
+- **`INCLUDE_EXTENSIONS`**: file extensions that are exported
+- **`WARNING_FILE_LIMIT`**: number of files above which the app asks for confirmation
+- **`PREVIEW_LIMIT`**: maximum number of characters shown in the preview (saving and copying always use the full text)
+- **`OUTPUT_FILE_NAME`**: default name of the generated file
+
+## Tech stack
+
+| Layer | Technologies |
+| --- | --- |
+| Language | Python 3 |
+| GUI | CustomTkinter (Tkinter) |
+| Syntax highlighting | Pygments |
+
+## Getting started
+
+Requires Python 3.10 or newer.
+
+1. Clone the repository:
+
+```bash
+git clone https://github.com/Narothe/CodeCollector.git
+cd CodeCollector
+```
+
+2. Create a virtual environment and install the dependencies:
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+source .venv/bin/activate     # macOS / Linux
+pip install -r requirements.txt
+```
+
+3. Run the app:
+
+```bash
+python main.py
+```
+
+### Usage
+
+1. Click **Browse** and select the project folder.
+2. Click **Generate**.
+3. In the result window, check the preview and choose what to do:
+   - **Save file** - writes `project_code.txt` to the path shown in the *Save to* field (use **Change...** to pick another location),
+   - **Copy all** - copies everything to the clipboard,
+   - **Close** - closes the window without saving.
+
+## Author
+
+- [Narothe](https://github.com/Narothe)
+
+
+
+============================================================
+requirements.txt
+============================================================
+
+customtkinter>=5.2
+pygments>=2.17
+
+
+
+============================================================
+result_window.py
+============================================================
+
+"""The window shown after export: preview, save location, Save / Copy all / Close."""
+
+from pathlib import Path
+
+import customtkinter as ctk
+from tkinter import filedialog, messagebox
+
+from config import CODE_FONT, FONT
+from exporter import default_output_path, files_to_text, save_text
+from highlight import fill_preview
+
+MUTED_TEXT = ("gray35", "gray70")
+SUCCESS_TEXT = ("#1a7f37", "#4ac26b")
+
+
+class ResultWindow(ctk.CTkToplevel):
+    """Shows the collected code and lets the user save it or copy it."""
+
+    def __init__(self, app, folder, files, status_var):
+        super().__init__(app)
+
+        self.app = app
+        self.status_var = status_var
+        self.text = files_to_text(files)  # full text used by Save and Copy
+        self.files = files
+
+        self.path_var = ctk.StringVar(value=str(default_output_path(folder)))
+        self.result_var = ctk.StringVar(value="")
+
+        self.title("Export ready")
+        self.geometry("820x640")
+        self.minsize(600, 460)
+        self.transient(app)  # keep above the main window
+        self.after(100, self.focus)
+
+        self._build_header()
+        self._build_preview()
+        self._build_save_row()
+        self._build_buttons()
+
+    # ---- UI construction ----
+
+    def _build_header(self):
+        ctk.CTkLabel(
+            self, text="Export ready", font=(FONT, 20, "bold"), anchor="w"
+        ).pack(fill="x", padx=20, pady=(18, 0))
+
+        ctk.CTkLabel(
+            self,
+            text=(
+                f"{len(self.files):,} files collected ({len(self.text):,} characters). "
+                "Save it to a file or copy everything."
+            ),
+            font=(FONT, 13),
+            text_color=MUTED_TEXT,
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", padx=20, pady=(2, 10))
+
+    def _build_preview(self):
+        box = ctk.CTkTextbox(
+            self, font=(CODE_FONT, 12), corner_radius=10, wrap="none"
+        )
+        box.pack(fill="both", expand=True, padx=20)
+
+        fill_preview(box, self.files)
+        box.configure(state="disabled")  # read-only (selecting and Ctrl+C still work)
+
+    def _build_save_row(self):
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=20, pady=(12, 0))
+
+        ctk.CTkLabel(row, text="Save to:", font=(FONT, 13)).pack(
+            side="left", padx=(0, 8)
+        )
+
+        ctk.CTkButton(
+            row, text="Change...", width=90, height=32, command=self.change_location
+        ).pack(side="right", padx=(8, 0))
+
+        ctk.CTkEntry(
+            row, textvariable=self.path_var, height=32, corner_radius=8
+        ).pack(side="left", fill="x", expand=True)
+
+        # Confirmation line ("Saved: ..." / "Copied ...") shown under the row.
+        ctk.CTkLabel(
+            self,
+            textvariable=self.result_var,
+            font=(FONT, 12),
+            anchor="w",
+            text_color=SUCCESS_TEXT,
+        ).pack(fill="x", padx=20, pady=(8, 0))
+
+    def _build_buttons(self):
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=20, pady=(8, 18))
+
+        ctk.CTkButton(
+            row, text="Save file", width=130, height=36, command=self.save
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            row, text="Copy all", width=130, height=36, command=self.copy_all
+        ).pack(side="left", padx=10)
+
+        ctk.CTkButton(
+            row,
+            text="Close",
+            width=100,
+            height=36,
+            fg_color="transparent",
+            border_width=1,
+            text_color=("gray10", "gray90"),
+            command=self.destroy,
+        ).pack(side="right")
+
+    # ---- Actions ----
+
+    def change_location(self):
+        """Lets the user pick the output file with the system 'Save as' dialog."""
+        current = Path(self.path_var.get())
+
+        chosen = filedialog.asksaveasfilename(
+            parent=self,
+            title="Choose where to save",
+            initialdir=str(current.parent),
+            initialfile=current.name,
+            defaultextension=".txt",
+            filetypes=[("Text file", "*.txt"), ("All files", "*.*")],
+        )
+
+        if chosen:
+            self.path_var.set(str(Path(chosen)))
+
+    def save(self):
+        """Writes the full text to the path currently shown in the entry."""
+        target = self.path_var.get().strip()
+
+        if not target:
+            messagebox.showwarning("Warning", "Choose where to save.", parent=self)
+            return
+
+        try:
+            output = save_text(target, self.text)
+        except OSError as error:
+            messagebox.showerror("Error", str(error), parent=self)
+            return
+
+        self.result_var.set(f"Saved: {output}")
+        self.status_var.set(f"Saved ✓ ({output.name})")
+
+    def copy_all(self):
+        """Copies the full text (without colors) to the clipboard."""
+        self.app.clipboard_clear()
+        self.app.clipboard_append(self.text)
+        self.app.update()  # keeps the clipboard content alive after the window closes
+
+        self.result_var.set("Copied everything to the clipboard ✓")
+
+
+

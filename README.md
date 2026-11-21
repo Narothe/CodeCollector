@@ -36,6 +36,34 @@ CodeCollector walks through a project folder, picks up the source files worth sh
 - Follows the system light/dark mode
 - Progress indicator while the project is being scanned
 
+## Screenshots
+
+### Main window
+
+<p align="center">
+  <img src="img/img1.png" alt="Main window with the project folder field and the Generate button" width="60%">
+</p>
+
+### After generating
+
+Once the export is finished, the result window opens next to the main window.
+
+<p align="center">
+  <img src="img/img2.png" alt="Result window opened next to the main window after generating" width="90%">
+</p>
+
+### Result window
+
+A syntax-highlighted preview, the save location (changeable with **Change...**) and the **Save file** / **Copy all** buttons.
+
+<p align="center">
+  <img src="img/img3.png" alt="Result window with a syntax-highlighted preview and the save location" width="70%">
+</p>
+
+### Example output
+
+Want to see what the program produces? [`project_code.txt`](project_code.txt) is the real export of this very repository - one text file with a header (the relative path) above every source file.
+
 ## Architecture
 
 The code is split into small modules with a single responsibility each:
